@@ -519,3 +519,55 @@ def yolov8_pytorch_pp(model_yaml: str,
                                   iou_threshold=iou_threshold,
                                   max_detections=max_detections)
     return model_pp, cfg_dict
+
+## segmentation classes
+class Proto(nn.Module):
+    """YOLOv8 mask Proto module for segmentation models."""
+
+    def __init__(self, c1, c_=256, c2=32):
+        """
+        Initializes the YOLOv8 mask Proto module with specified number of protos and masks.
+
+        Input arguments are ch_in, number of protos, number of masks.
+        """
+        super().__init__()
+        self.cv1 = Conv(c1, c_, k=3)
+        self.upsample = nn.ConvTranspose2d(c_, c_, 2, 2, 0, bias=True)  # nn.Upsample(scale_factor=2, mode='nearest')
+        self.cv2 = Conv(c_, c_, k=3)
+        self.cv3 = Conv(c_, c2)
+
+    def forward(self, x):
+        """Performs a forward pass through layers using an upsampled input image."""
+        return self.cv3(self.cv2(self.upsample(self.cv1(x))))
+
+
+
+class UpdatedSegment(Detect):
+    """
+    Updated YOLOv8 Segment head for segmentation models.
+    This version is designed to be compatible with the updated Detect class and quantization methods.
+    """
+
+    def __init__(self, nc=80, nm=32, npr=256, ch=()):
+        super().__init__(nc, ch)
+        self.nm = nm  # Number of masks
+        self.npr = npr  # Number of prototypes
+        self.proto = Proto(ch[0], self.npr, self.nm)  # Prototypes
+
+        # Convolution layers for mask coefficients
+        c4 = max(ch[0] // 4, self.nm)
+        self.cv4 = nn.ModuleList([nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nm, 1)) for x in ch])
+
+    def forward(self, x):
+        p = self.proto(x[0])  # Generate mask prototypes
+        bs = p.shape[0]  # Batch size
+
+        # Generate mask coefficients
+        mc = torch.cat([self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(len(self.cv4))], 2)
+
+        # Use the updated Detect class's forward method to get bounding box and class predictions
+        y_bb, y_cls = super().forward(x)
+
+        # Return bounding box predictions, class predictions, mask coefficients, and prototypes
+        # This structure is designed to be more compatible with quantization methods
+        return y_bb, y_cls, mc, p
